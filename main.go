@@ -39,43 +39,37 @@ func init() {
 	githubClient = github.NewClient(transport.Client())
 }
 
-func fetch(from string) (*github.RepositoryRelease, error) {
-	names := strings.SplitN(from, "/", 2)
-	latestRelease, _, err := githubClient.Repositories.GetLatestRelease(context.Background(), names[0], names[1])
+// downloadFile fetches one file from a repository branch via the GitHub API.
+func downloadFile(owner, repo, ref, filePath string) ([]byte, error) {
+	log.Info("download ", owner, "/", repo, "@", ref, "/", filePath)
+	reader, response, err := githubClient.Repositories.DownloadContents(
+		context.Background(), owner, repo, filePath,
+		&github.RepositoryContentGetOptions{Ref: ref},
+	)
 	if err != nil {
 		return nil, err
 	}
-	return latestRelease, err
+	if response != nil && response.StatusCode != http.StatusOK {
+		reader.Close()
+		return nil, E.New("failed to download ", filePath, ": status ", response.StatusCode)
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
 }
 
-func get(downloadURL *string) ([]byte, error) {
-	log.Info("download ", *downloadURL)
-	response, err := http.Get(*downloadURL)
+// download fetches dlc.dat and its checksum from the source repository's release
+// branch, verifies the sha256, and returns the data.
+func download(source string) ([]byte, error) {
+	names := strings.SplitN(source, "/", 2)
+	if len(names) != 2 {
+		return nil, E.New("invalid source repository: ", source)
+	}
+	owner, repo := names[0], names[1]
+	data, err := downloadFile(owner, repo, "release", "dlc.dat")
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
-	return io.ReadAll(response.Body)
-}
-
-func download(release *github.RepositoryRelease) ([]byte, error) {
-	geositeAsset := common.Find(release.Assets, func(it *github.ReleaseAsset) bool {
-		return *it.Name == "dlc.dat"
-	})
-	geositeChecksumAsset := common.Find(release.Assets, func(it *github.ReleaseAsset) bool {
-		return *it.Name == "dlc.dat.sha256sum"
-	})
-	if geositeAsset == nil {
-		return nil, E.New("geosite asset not found in upstream release ", release.Name)
-	}
-	if geositeChecksumAsset == nil {
-		return nil, E.New("geosite asset not found in upstream release ", release.Name)
-	}
-	data, err := get(geositeAsset.BrowserDownloadURL)
-	if err != nil {
-		return nil, err
-	}
-	remoteChecksum, err := get(geositeChecksumAsset.BrowserDownloadURL)
+	remoteChecksum, err := downloadFile(owner, repo, "release", "dlc.dat.sha256sum")
 	if err != nil {
 		return nil, err
 	}
@@ -329,11 +323,7 @@ var targetTags = []string{
 	"geolocation-!cn@cn",
 }
 
-func generate(release *github.RepositoryRelease, ruleSetOutput string) error {
-	vData, err := download(release)
-	if err != nil {
-		return err
-	}
+func generate(vData []byte, ruleSetOutput string) error {
 	if os.Getenv("NO_SKIP") != "true" {
 		unchanged, err := tagsUnchanged(vData)
 		if err != nil {
@@ -425,16 +415,11 @@ func setActionOutput(name string, content string) {
 }
 
 func release(source string, ruleSetOutput string) error {
-	sourceRelease, err := fetch(source)
+	vData, err := download(source)
 	if err != nil {
 		return err
 	}
-	err = generate(sourceRelease, ruleSetOutput)
-	if err != nil {
-		return err
-	}
-	setActionOutput("tag", *sourceRelease.Name)
-	return nil
+	return generate(vData, ruleSetOutput)
 }
 
 func main() {
