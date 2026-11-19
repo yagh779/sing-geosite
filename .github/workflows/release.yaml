@@ -8,6 +8,8 @@ on:
         default: false
   schedule:
     - cron: "0 0 * * *"
+permissions:
+  contents: write
 jobs:
   build:
     name: Build
@@ -28,6 +30,18 @@ jobs:
           ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go run -v .
+      - name: Commit tag state
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sync-state.json
+          if git diff --cached --quiet; then
+            echo "No tag state change."
+          else
+            git commit -m "chore: update tag fingerprints"
+            git push origin HEAD:main
+          fi
       - name: Release rule sets
         if: steps.build.outputs.skip != 'true'
         run: .github/release-rule-set.sh

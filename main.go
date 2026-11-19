@@ -86,6 +86,125 @@ func download(release *github.RepositoryRelease) ([]byte, error) {
 	return data, nil
 }
 
+const syncStatePath = "sync-state.json"
+
+// tagTypeName maps a protobuf domain type to the same stable label used by
+// the domain-list-community fingerprint tool, so both repositories compute
+// identical fingerprints for the same tag.
+func tagTypeName(t routercommon.Domain_Type) string {
+	switch t {
+	case routercommon.Domain_Plain:
+		return "keyword"
+	case routercommon.Domain_Regex:
+		return "regex"
+	case routercommon.Domain_RootDomain:
+		return "domain"
+	case routercommon.Domain_Full:
+		return "full"
+	default:
+		return "typeX"
+	}
+}
+
+func splitTagCode(tag string) (string, string, bool) {
+	i := strings.Index(tag, "@")
+	if i <= 0 || i == len(tag)-1 {
+		return "", "", false
+	}
+	return tag[:i], tag[i+1:], true
+}
+
+func domainHasAttr(d *routercommon.Domain, attr string) bool {
+	for _, a := range d.Attribute {
+		if a.Key == attr {
+			return true
+		}
+	}
+	return false
+}
+
+// tagFingerprint returns a stable sha256 over the raw (type,value) domains of
+// one tag (code@attr) in the source dlc.dat, matching
+// domain-list-community's `sync hashtag` output exactly.
+func tagFingerprint(vGeositeData []byte, tag string) (string, error) {
+	list := &routercommon.GeoSiteList{}
+	if err := proto.Unmarshal(vGeositeData, list); err != nil {
+		return "", err
+	}
+	code, attr, ok := splitTagCode(tag)
+	if !ok {
+		return "", E.New("invalid tag: ", tag)
+	}
+	var entry *routercommon.GeoSite
+	for _, e := range list.Entry {
+		if strings.EqualFold(e.CountryCode, code) {
+			entry = e
+			break
+		}
+	}
+	if entry == nil {
+		return "", E.New("entry not found in upstream data: ", code)
+	}
+	lines := make([]string, 0, len(entry.Domain))
+	for _, d := range entry.Domain {
+		if domainHasAttr(d, attr) {
+			lines = append(lines, tagTypeName(d.Type)+"\x00"+d.Value)
+		}
+	}
+	sort.Strings(lines)
+	unique := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if i == 0 || line != lines[i-1] {
+			unique = append(unique, line)
+		}
+	}
+	h := sha256.New()
+	for _, line := range unique {
+		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func loadSyncState() map[string]string {
+	state := map[string]string{}
+	content, err := os.ReadFile(syncStatePath)
+	if err != nil {
+		return state
+	}
+	if err = json.Unmarshal(content, &state); err != nil {
+		return map[string]string{}
+	}
+	return state
+}
+
+func saveSyncState(state map[string]string) error {
+	content, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(syncStatePath, append(content, '\n'), 0o644)
+}
+
+// tagsUnchanged reports whether every target tag fingerprint in the upstream
+// data equals the last built fingerprint recorded in sync-state.json.
+func tagsUnchanged(vGeositeData []byte) (bool, error) {
+	previous := loadSyncState()
+	if len(previous) == 0 {
+		return false, nil
+	}
+	for _, tag := range targetTags {
+		current, err := tagFingerprint(vGeositeData, tag)
+		if err != nil {
+			return false, err
+		}
+		if previous[tag] != current {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func parse(vGeositeData []byte) (map[string][]geosite.Item, error) {
 	vGeositeList := routercommon.GeoSiteList{}
 	err := proto.Unmarshal(vGeositeData, &vGeositeList)
@@ -215,6 +334,17 @@ func generate(release *github.RepositoryRelease, ruleSetOutput string) error {
 	if err != nil {
 		return err
 	}
+	if os.Getenv("NO_SKIP") != "true" {
+		unchanged, err := tagsUnchanged(vData)
+		if err != nil {
+			return err
+		}
+		if unchanged {
+			log.Info("upstream cn@!cn and geolocation-!cn@cn unchanged, skip build")
+			setActionOutput("skip", "true")
+			return nil
+		}
+	}
 	domainMap, err := parse(vData)
 	if err != nil {
 		return err
@@ -269,6 +399,17 @@ func generate(release *github.RepositoryRelease, ruleSetOutput string) error {
 		outputRuleSet.Close()
 		log.Info("generated ", code, " (", len(domains), " items)")
 	}
+	state := make(map[string]string, len(targetTags))
+	for _, code := range targetTags {
+		fingerprint, err := tagFingerprint(vData, code)
+		if err != nil {
+			return err
+		}
+		state[code] = fingerprint
+	}
+	if err = saveSyncState(state); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -283,20 +424,10 @@ func setActionOutput(name string, content string) {
 	}
 }
 
-func release(source string, destination string, ruleSetOutput string) error {
+func release(source string, ruleSetOutput string) error {
 	sourceRelease, err := fetch(source)
 	if err != nil {
 		return err
-	}
-	destinationRelease, err := fetch(destination)
-	if err != nil {
-		log.Warn("missing destination latest release")
-	} else {
-		if os.Getenv("NO_SKIP") != "true" && strings.Contains(*destinationRelease.Name, *sourceRelease.Name) {
-			log.Info("already latest")
-			setActionOutput("skip", "true")
-			return nil
-		}
 	}
 	err = generate(sourceRelease, ruleSetOutput)
 	if err != nil {
@@ -309,7 +440,6 @@ func release(source string, destination string, ruleSetOutput string) error {
 func main() {
 	err := release(
 		"yagh779/domain-list-community",
-		"yagh779/sing-geosite",
 		"rule-set",
 	)
 	if err != nil {
