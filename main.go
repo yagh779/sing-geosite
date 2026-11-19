@@ -308,7 +308,7 @@ func release(source string, destination string, ruleSetOutput string) error {
 
 func main() {
 	err := release(
-		"nekolsd/domain-list-community",
+		"yagh779/domain-list-community",
 		"yagh779/sing-geosite",
 		"rule-set",
 	)

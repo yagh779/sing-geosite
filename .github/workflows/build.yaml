@@ -22,6 +22,7 @@ jobs:
         id: build
         env:
           NO_SKIP: true
+          ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go run -v .
 

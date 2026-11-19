@@ -25,6 +25,7 @@ jobs:
         id: build
         env:
           NO_SKIP: ${{ inputs.no_skip == true && 'true' || 'false' }}
+          ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go run -v .
       - name: Release rule sets
