@@ -199,123 +199,63 @@ func tagsUnchanged(vGeositeData []byte) (bool, error) {
 	return true, nil
 }
 
-func parse(vGeositeData []byte) (map[string][]geosite.Item, error) {
-	vGeositeList := routercommon.GeoSiteList{}
-	err := proto.Unmarshal(vGeositeData, &vGeositeList)
-	if err != nil {
-		return nil, err
+// parseTag extracts the domains of one tag (code@attr) from the source
+// dlc.dat and converts them to sing-box geosite items. It returns loaded=false
+// when the entry is absent from the upstream data.
+func parseTag(vGeositeData []byte, tag string) (domains []geosite.Item, loaded bool, err error) {
+	list := &routercommon.GeoSiteList{}
+	if err = proto.Unmarshal(vGeositeData, list); err != nil {
+		return nil, false, err
 	}
-	domainMap := make(map[string][]geosite.Item)
-	for _, vGeositeEntry := range vGeositeList.Entry {
-		code := strings.ToLower(vGeositeEntry.CountryCode)
-		domains := make([]geosite.Item, 0, len(vGeositeEntry.Domain)*2)
-		attributes := make(map[string][]*routercommon.Domain)
-		for _, domain := range vGeositeEntry.Domain {
-			if len(domain.Attribute) > 0 {
-				for _, attribute := range domain.Attribute {
-					attributes[attribute.Key] = append(attributes[attribute.Key], domain)
-				}
-			}
-			switch domain.Type {
-			case routercommon.Domain_Plain:
-				domains = append(domains, geosite.Item{
-					Type:  geosite.RuleTypeDomainKeyword,
-					Value: domain.Value,
-				})
-			case routercommon.Domain_Regex:
-				domains = append(domains, geosite.Item{
-					Type:  geosite.RuleTypeDomainRegex,
-					Value: domain.Value,
-				})
-			case routercommon.Domain_RootDomain:
-				if strings.Contains(domain.Value, ".") {
-					domains = append(domains, geosite.Item{
-						Type:  geosite.RuleTypeDomain,
-						Value: domain.Value,
-					})
-				}
-				domains = append(domains, geosite.Item{
-					Type:  geosite.RuleTypeDomainSuffix,
-					Value: "." + domain.Value,
-				})
-			case routercommon.Domain_Full:
+	code, attr, ok := splitTagCode(tag)
+	if !ok {
+		return nil, false, E.New("invalid tag: ", tag)
+	}
+	var entry *routercommon.GeoSite
+	for _, e := range list.Entry {
+		if strings.EqualFold(e.CountryCode, code) {
+			entry = e
+			break
+		}
+	}
+	if entry == nil {
+		return nil, false, nil
+	}
+	domains = make([]geosite.Item, 0, len(entry.Domain)*2)
+	for _, domain := range entry.Domain {
+		if !domainHasAttr(domain, attr) {
+			continue
+		}
+		switch domain.Type {
+		case routercommon.Domain_Plain:
+			domains = append(domains, geosite.Item{
+				Type:  geosite.RuleTypeDomainKeyword,
+				Value: domain.Value,
+			})
+		case routercommon.Domain_Regex:
+			domains = append(domains, geosite.Item{
+				Type:  geosite.RuleTypeDomainRegex,
+				Value: domain.Value,
+			})
+		case routercommon.Domain_RootDomain:
+			if strings.Contains(domain.Value, ".") {
 				domains = append(domains, geosite.Item{
 					Type:  geosite.RuleTypeDomain,
 					Value: domain.Value,
 				})
 			}
-		}
-		domainMap[code] = common.Uniq(domains)
-		for attribute, attributeEntries := range attributes {
-			attributeDomains := make([]geosite.Item, 0, len(attributeEntries)*2)
-			for _, domain := range attributeEntries {
-				switch domain.Type {
-				case routercommon.Domain_Plain:
-					attributeDomains = append(attributeDomains, geosite.Item{
-						Type:  geosite.RuleTypeDomainKeyword,
-						Value: domain.Value,
-					})
-				case routercommon.Domain_Regex:
-					attributeDomains = append(attributeDomains, geosite.Item{
-						Type:  geosite.RuleTypeDomainRegex,
-						Value: domain.Value,
-					})
-				case routercommon.Domain_RootDomain:
-					if strings.Contains(domain.Value, ".") {
-						attributeDomains = append(attributeDomains, geosite.Item{
-							Type:  geosite.RuleTypeDomain,
-							Value: domain.Value,
-						})
-					}
-					attributeDomains = append(attributeDomains, geosite.Item{
-						Type:  geosite.RuleTypeDomainSuffix,
-						Value: "." + domain.Value,
-					})
-				case routercommon.Domain_Full:
-					attributeDomains = append(attributeDomains, geosite.Item{
-						Type:  geosite.RuleTypeDomain,
-						Value: domain.Value,
-					})
-				}
-			}
-			domainMap[code+"@"+attribute] = common.Uniq(attributeDomains)
+			domains = append(domains, geosite.Item{
+				Type:  geosite.RuleTypeDomainSuffix,
+				Value: "." + domain.Value,
+			})
+		case routercommon.Domain_Full:
+			domains = append(domains, geosite.Item{
+				Type:  geosite.RuleTypeDomain,
+				Value: domain.Value,
+			})
 		}
 	}
-	return domainMap, nil
-}
-
-func filterTags(data map[string][]geosite.Item) {
-	var codeList []string
-	for code := range data {
-		codeList = append(codeList, code)
-	}
-
-	var filteredCodeMap []string
-
-	for _, code := range codeList {
-		codeParts := strings.Split(code, "@")
-		if len(codeParts) != 2 {
-			continue
-		}
-		leftParts := strings.Split(codeParts[0], "-")
-		var lastName string
-		if len(leftParts) > 1 {
-			lastName = leftParts[len(leftParts)-1]
-		}
-		if lastName == "" {
-			lastName = codeParts[0]
-		}
-		if lastName == codeParts[1] {
-			delete(data, code)
-			filteredCodeMap = append(filteredCodeMap, code)
-			continue
-		}
-
-	}
-	sort.Strings(filteredCodeMap)
-
-	os.Stderr.WriteString("filtered " + strings.Join(filteredCodeMap, ",") + "\n")
-
+	return common.Uniq(domains), true, nil
 }
 
 var targetTags = []string{
@@ -335,18 +275,15 @@ func generate(vData []byte, ruleSetOutput string) error {
 			return nil
 		}
 	}
-	domainMap, err := parse(vData)
-	if err != nil {
-		return err
-	}
-	filterTags(domainMap)
 	os.RemoveAll(ruleSetOutput)
-	err = os.MkdirAll(ruleSetOutput, 0o755)
-	if err != nil {
+	if err := os.MkdirAll(ruleSetOutput, 0o755); err != nil {
 		return err
 	}
 	for _, code := range targetTags {
-		domains, loaded := domainMap[code]
+		domains, loaded, err := parseTag(vData, code)
+		if err != nil {
+			return err
+		}
 		if !loaded {
 			log.Warn("tag not found in upstream data: ", code)
 			continue
@@ -397,7 +334,7 @@ func generate(vData []byte, ruleSetOutput string) error {
 		}
 		state[code] = fingerprint
 	}
-	if err = saveSyncState(state); err != nil {
+	if err := saveSyncState(state); err != nil {
 		return err
 	}
 	return nil
