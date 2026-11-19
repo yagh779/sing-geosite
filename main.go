@@ -1,10 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -205,34 +205,12 @@ func filterTags(data map[string][]geosite.Item) {
 
 }
 
-func generateDomainSet(domainMap map[string][]geosite.Item, output string) error {
-	os.RemoveAll(output)
-	if err := os.MkdirAll(output, 0o755); err != nil {
-		return err
-	}
-	for code, items := range domainMap {
-		var lines []string
-		for _, item := range items {
-			switch item.Type {
-			case geosite.RuleTypeDomain:
-				lines = append(lines, item.Value)
-			case geosite.RuleTypeDomainSuffix:
-				lines = append(lines, item.Value)
-			}
-		}
-		if len(lines) == 0 {
-			continue
-		}
-		sort.Strings(lines)
-		filePath := filepath.Join(output, code+".txt")
-		if err := os.WriteFile(filePath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-			return err
-		}
-	}
-	return nil
+var targetTags = []string{
+	"cn@!cn",
+	"geolocation-!cn@cn",
 }
 
-func generate(release *github.RepositoryRelease, output string, ruleSetOutput string, domainSetOutput string) error {
+func generate(release *github.RepositoryRelease, ruleSetOutput string) error {
 	vData, err := download(release)
 	if err != nil {
 		return err
@@ -242,28 +220,17 @@ func generate(release *github.RepositoryRelease, output string, ruleSetOutput st
 		return err
 	}
 	filterTags(domainMap)
-	outputPath, _ := filepath.Abs(output)
-	os.Stderr.WriteString("write " + outputPath + "\n")
-	outputFile, err := os.Create(output)
-	if err != nil {
-		return err
-	}
-	defer outputFile.Close()
-	outputWriter := bufio.NewWriter(outputFile)
-	err = geosite.Write(outputWriter, domainMap)
-	if err != nil {
-		return err
-	}
-	err = outputWriter.Flush()
-	if err != nil {
-		return err
-	}
 	os.RemoveAll(ruleSetOutput)
 	err = os.MkdirAll(ruleSetOutput, 0o755)
 	if err != nil {
 		return err
 	}
-	for code, domains := range domainMap {
+	for _, code := range targetTags {
+		domains, loaded := domainMap[code]
+		if !loaded {
+			log.Warn("tag not found in upstream data: ", code)
+			continue
+		}
 		var headlessRule option.DefaultHeadlessRule
 		defaultRule := geosite.Compile(domains)
 		headlessRule.Domain = defaultRule.Domain
@@ -277,8 +244,19 @@ func generate(release *github.RepositoryRelease, output string, ruleSetOutput st
 				DefaultOptions: headlessRule,
 			},
 		}
+		jsonPath, _ := filepath.Abs(filepath.Join(ruleSetOutput, code+".json"))
+		ruleSetCompat := option.PlainRuleSetCompat{
+			Version: C.RuleSetVersionCurrent,
+			Options: plainRuleSet,
+		}
+		jsonContent, err := json.MarshalIndent(ruleSetCompat, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err = os.WriteFile(jsonPath, append(jsonContent, '\n'), 0o644); err != nil {
+			return err
+		}
 		srsPath, _ := filepath.Abs(filepath.Join(ruleSetOutput, code+".srs"))
-		// os.Stderr.WriteString("write " + srsPath + "\n")
 		outputRuleSet, err := os.Create(srsPath)
 		if err != nil {
 			return err
@@ -289,8 +267,9 @@ func generate(release *github.RepositoryRelease, output string, ruleSetOutput st
 			return err
 		}
 		outputRuleSet.Close()
+		log.Info("generated ", code, " (", len(domains), " items)")
 	}
-	return generateDomainSet(domainMap, domainSetOutput)
+	return nil
 }
 
 func setActionOutput(name string, content string) {
@@ -304,7 +283,7 @@ func setActionOutput(name string, content string) {
 	}
 }
 
-func release(source string, destination string, output string, ruleSetOutput string, domainSetOutput string) error {
+func release(source string, destination string, ruleSetOutput string) error {
 	sourceRelease, err := fetch(source)
 	if err != nil {
 		return err
@@ -319,7 +298,7 @@ func release(source string, destination string, output string, ruleSetOutput str
 			return nil
 		}
 	}
-	err = generate(sourceRelease, output, ruleSetOutput, domainSetOutput)
+	err = generate(sourceRelease, ruleSetOutput)
 	if err != nil {
 		return err
 	}
@@ -330,10 +309,8 @@ func release(source string, destination string, output string, ruleSetOutput str
 func main() {
 	err := release(
 		"nekolsd/domain-list-community",
-		"nekolsd/sing-geosite",
-		"geosite.db",
+		"yagh779/sing-geosite",
 		"rule-set",
-		"domain-set",
 	)
 	if err != nil {
 		log.Fatal(err)

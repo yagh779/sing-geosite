@@ -1,5 +1,5 @@
 /.idea/
 /vendor/
-/geosite.db
+/.cache/
 /rule-set/
-/domain-set/
+/sing-geosite
